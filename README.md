@@ -1,5 +1,5 @@
 ---
-title: AutoClaw Parallel Swarm Workspace
+title: AutoClaw Multi-Agent Code Orchestrator
 emoji: 🎛️
 colorFrom: red
 colorTo: yellow
@@ -8,32 +8,36 @@ app_port: 7860
 pinned: false
 ---
 
-# 🔧 AutoClaw Parallel Swarm UI
+# 🎛️ Autonomous Multi-Agent Code-Debate Orchestrator
 
-A production-grade web UI wrapper for AutoClaw that orchestrates **three specialized AI sub-agents** working in parallel — Architect, Backend Developer, and Frontend Designer — with live side-by-side terminal logs and a central execution bus visualizer.
+A Gradio web UI that orchestrates 4 specialized AI agents in an autonomous debate loop to generate, critique, refactor, and verify **x86 kernel source code**.
+
+## Swarm Architecture
+
+```
+User → Architect (GLM-5.2) → Critic (DeepSeek-V4-Pro)
+                                   ↓
+                    ┌── [APPROVED] ──→ QA (MiniMax-M3) → [VERIFIED]
+                    │
+                    └── [REJECTED] → Refactorer (Ornith-397B) → Critic (max 5 loops)
+```
+
+## Agents
+
+| # | Agent | Provider | Role |
+|---|-------|----------|------|
+| 🏗️ | Architect | GLM-5.2 / Zhipu | Generates boot.asm, kernel.c, linker.ld |
+| 🔍 | Critic | DeepSeek-V4-Pro | Reviews syntax, memory, ABI with `thinking_effort=max` |
+| 🔧 | Refactorer | Ornith-1.0-397B | Fixes rejected code, resubmits to Critic (max 5 loops) |
+| 🔬 | QA | MiniMax-M3 | Mock-compiles, verifies completeness, issues [VERIFIED] |
 
 ## Features
 
-- **Parallel Agent Swarm** — 3 agents run simultaneously via `asyncio.gather`
-- **Live Terminal Columns** — Side-by-side streaming output for each agent
-- **Execution Bus Visualizer** — See how code merges without conflicts
-- **Web UI** — Gradio-powered interface on port 7860
-- **Docker Deployable** — Ready for Hugging Face Spaces
-
-## Architecture
-
-```
-┌─────────────────────────────────────────────────────┐
-│                   Gradio Web UI                      │
-│  ┌──────────┬──────────┬──────────┐                 │
-│  │Architect │ Backend  │ Frontend │                 │
-│  │  Agent   │  Agent   │  Agent   │                 │
-│  └──────────┴──────────┴──────────┘                 │
-│  ┌─────────────────────────────────────┐            │
-│  │     Central Execution Bus           │            │
-│  └─────────────────────────────────────┘            │
-└─────────────────────────────────────────────────────┘
-```
+- **API Configuration Console** — Per-agent API keys & endpoint management
+- **Live Split-Column Terminal Logs** — All 4 agents stream in real-time side-by-side
+- **Execution Bus** — Central state visualizer with agent status, loop count, verdict tracking
+- **Virtual File System** — Mock-compiled file array (boot.asm, kernel.c, linker.ld) with SHA256
+- **Simulation Mode** — Full demo with pre-recorded x86 code when API keys are not provided
 
 ## Quick Start
 
@@ -42,16 +46,9 @@ pip install -r requirements.txt
 python app.py
 ```
 
-## Environment Variables
-
-| Variable | Description | Default |
-|----------|-------------|---------|
-| `OPENAI_API_KEY` | LLM API key | Required |
-| `OPENAI_BASE_URL` | API base URL | `https://api.openai.com/v1` |
-| `OPENAI_MODEL` | Model name | `gpt-4` |
-| `MAX_TOKENS` | Max response tokens | `4096` |
+Open `http://localhost:7860` — configure API keys in the 🔑 tab, then launch from 🚀 tab.
 
 ## Links
 
-- **GitHub Repository:** [Sandeep-12345678/autoclaw-parallel-swarm-ui](https://github.com/Sandeep-12345678/autoclaw-parallel-swarm-ui)
+- **GitHub:** [Sandeep-12345678/autoclaw-parallel-swarm-ui](https://github.com/Sandeep-12345678/autoclaw-parallel-swarm-ui)
 - **Live Demo:** [Hugging Face Spaces](https://huggingface.co/spaces/sandeep-73/autoclaw-parallel-swarm-ui)
