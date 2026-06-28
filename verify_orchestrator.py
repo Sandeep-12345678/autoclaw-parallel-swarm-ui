@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""verify_orchestrator.py — Validate improved swarm orchestrator"""
+"""verify_orchestrator.py — Validate real-model swarm orchestrator"""
 import sys
 P = F = 0
 def c(n, ok, d=""):
@@ -9,8 +9,7 @@ def c(n, ok, d=""):
 
 print("📦 [1/5] Imports...")
 for mod in ["asyncio","hashlib","json","os","re","sys","textwrap","time","traceback",
-            "dataclasses","datetime","enum","typing","uuid","requests","io","zipfile",
-            "gradio","openai"]:
+            "dataclasses","datetime","enum","typing","uuid","requests","gradio","openai"]:
     try: __import__(mod); c(f"import {mod}", True)
     except ImportError as e: c(f"import {mod}", False, str(e))
 
@@ -21,29 +20,32 @@ try:
 except SyntaxError as e: c("app.py compiles", False, f"L{e.lineno}: {e.msg}")
 
 print("🏗️  [3/5] Structure...")
-checks = [
-    ("True parallel generators", "asyncio.gather"),
-    ("Parallel critics", "critic_tasks"),
-    ("Parallel refactorers", "refac_tasks"),
-    ("Parallel QA", "qa_tasks"),
-    ("Agent health status", 'status == "available"'),
+neg = [  # patterns that MUST NOT exist
+    ("No sim_mode", "sim_mode"),
+    ("No SIM_ constants", "SIM_ARCHITECT"),
+    ("No _sim_stream", "_sim_stream"),
+    ("No sim fallback", "Falling back to simulation"),
+]
+pos = [
+    ("has_key method", "def has_key"),
+    ("test_connection method", "def test_connection"),
+    ("Test Connection button", "Test Connection"),
+    ("Test All Connections", "Test All Connections"),
+    ("Real API key check", "has_key(agent_id)"),
+    ("No simulation in About", "Real Models Only"),
+    ("Parallel generators", "asyncio.gather"),
+    ("Parallel critics", "critic_tasks_list"),
+    ("Parallel refactorers", "refac_tasks_list"),
+    ("Parallel QA", "qa_tasks_list"),
+    ("Health dashboard", "💓 Health"),
     ("RETRY_INTERVAL", "RETRY_INTERVAL"),
-    ("Retry loop", "_retry_loop"),
-    ("ensure_retry_loop", "ensure_retry_loop"),
-    ("Health dashboard tab", "💓 Health"),
-    ("Download button", "download_btn"),
-    ("Build download fn", "def build_download"),
-    ("API timeout", "timeout"),
-    ("call_free_api_with_retry", "call_free_api_with_retry"),
-    ("No sim fallback", "Simulation mode ONLY"),
     ("Rate limit handler", "RateLimitError"),
     ("Peter JS", "JAVASCRIPT_GENERATOR_PROMPT"),
-    ("Agent Registry tab", "Agent Registry"),
-    ("Swarm Orchestrator tab", "Swarm Orchestrator"),
-    ("Unlimited loops", "unlimited_loops"),
     ("Port 7860", "server_port=7860"),
 ]
-for label, pat in checks:
+for label, pat in neg:
+    c(label, pat not in src)
+for label, pat in pos:
     c(label, pat in src)
 
 print("📋 [4/5] Requirements...")

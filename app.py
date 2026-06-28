@@ -326,274 +326,6 @@ class SwarmState:
 # SIMULATED OUTPUTS (fallback when no API keys)
 # ═══════════════════════════════════════════════════════════════
 
-SIM_ARCHITECT_OUTPUT = textwrap.dedent("""\
-### boot.asm
-```asm
-[bits 16]
-[org 0x7C00]
-KERNEL_OFFSET equ 0x7E00
-start:
-    xor ax, ax
-    mov ds, ax
-    mov es, ax
-    mov ss, ax
-    mov sp, 0x7C00
-    mov [BOOT_DRIVE], dl
-    mov bx, KERNEL_OFFSET
-    mov dh, 16
-    mov dl, [BOOT_DRIVE]
-    call disk_load
-    cli
-    lgdt [gdt_descriptor]
-    mov eax, cr0
-    or eax, 0x1
-    mov cr0, eax
-    jmp CODE_SEG:init_pm
-[bits 32]
-init_pm:
-    mov ax, DATA_SEG
-    mov ds, ax
-    mov ss, ax
-    mov es, ax
-    mov fs, ax
-    mov gs, ax
-    mov ebp, 0x90000
-    mov esp, ebp
-    call KERNEL_OFFSET
-    jmp $
-disk_load:
-    pusha
-    mov ah, 0x02
-    mov al, dh
-    push dx
-    mov ch, 0x00
-    mov cl, 0x02
-    mov dh, 0x00
-    int 0x13
-    pop dx
-    jc disk_error
-    cmp al, dh
-    jne sectors_error
-    popa
-    ret
-disk_error:
-    mov si, DISK_ERROR_MSG
-    call print_string
-    jmp $
-sectors_error:
-    mov si, SECTORS_ERROR_MSG
-    call print_string
-    jmp $
-print_string:
-    pusha
-    mov ah, 0x0E
-.loop: lodsb; or al, al; jz .done; int 0x10; jmp .loop
-.done: popa; ret
-DISK_ERROR_MSG db "Disk error!", 0
-SECTORS_ERROR_MSG db "Sector mismatch!", 0
-BOOT_DRIVE db 0
-gdt_start: dd 0x0; dd 0x0
-gdt_code: dw 0xFFFF; dw 0x0; db 0x0; db 10011010b; db 11001111b; db 0x0
-gdt_data: dw 0xFFFF; dw 0x0; db 0x0; db 10010010b; db 11001111b; db 0x0
-gdt_end:
-gdt_descriptor: dw gdt_end - gdt_start - 1; dd gdt_start
-CODE_SEG equ gdt_code - gdt_start
-DATA_SEG equ gdt_data - gdt_start
-times 510 - ($ - $$) db 0
-dw 0xAA55
-```
-
-### kernel.c
-```c
-#define VGA_ADDRESS 0xB8000
-#define VGA_WIDTH   80
-#define VGA_HEIGHT  25
-typedef unsigned char  uint8_t;
-typedef unsigned short uint16_t;
-typedef unsigned int   uint32_t;
-static volatile uint16_t *const vga_buffer = (uint16_t *)VGA_ADDRESS;
-static void vga_print(const char *str, uint8_t row, uint8_t col, uint8_t attr) {
-    if (row >= VGA_HEIGHT) row = VGA_HEIGHT - 1;
-    if (col >= VGA_WIDTH)  col = VGA_WIDTH - 1;
-    uint16_t *dest = (uint16_t *)vga_buffer + (row * VGA_WIDTH) + col;
-    while (*str && col < VGA_WIDTH) {
-        *dest++ = (uint16_t)(*str++) | ((uint16_t)attr << 8);
-        col++;
-    }
-}
-static void vga_clear(uint8_t attr) {
-    for (uint32_t i = 0; i < VGA_WIDTH * VGA_HEIGHT; i++)
-        vga_buffer[i] = (uint16_t)' ' | ((uint16_t)attr << 8);
-}
-void kernel_main(void) {
-    vga_clear(0x0F);
-    vga_print("AutoClaw Kernel v1.0 - Swarm Compiled", 12, 20, 0x0F);
-    vga_print("All agents: PASS", 14, 28, 0x0A);
-    while (1) { __asm__ volatile ("hlt"); }
-}
-```
-
-### linker.ld
-```ld
-ENTRY(kernel_main)
-SECTIONS {
-    . = 0x100000;
-    .text ALIGN(4K) : { *(.text*) }
-    .rodata ALIGN(4K) : { *(.rodata*) }
-    .data ALIGN(4K) : { *(.data*) }
-    .bss ALIGN(4K) : { *(COMMON) *(.bss*) }
-}
-```
-""")
-
-SIM_CRITIC_APPROVED = textwrap.dedent("""\
-## Code Review
-- ✅ boot.asm: correct GDT, pmode switch, 512B with 0xAA55
-- ✅ kernel.c: volatile VGA buffer, bounds-checked print, halt loop
-- ✅ linker.ld: ENTRY(kernel_main), section alignment correct
-[APPROVED]
-""")
-
-SIM_CRITIC_REJECTED = textwrap.dedent("""\
-## Code Review
-- ❌ boot.asm: KERNEL_OFFSET at 0x1000 overlaps IVT; use 0x7E00
-- ❌ kernel.c: missing bounds check on vga_print column
-- ❌ linker.ld: missing ALIGN directives
-[REJECTED]
-""")
-
-SIM_REFACTORER_OUTPUT = textwrap.dedent("""\
-## Refactored Code
-### boot.asm
-```asm
-KERNEL_OFFSET equ 0x7E00
-; (rest of boot.asm identical but with KERNEL_OFFSET fixed)
-```
-### kernel.c
-```c
-static void vga_print(const char *str, uint8_t row, uint8_t col, uint8_t attr) {
-    if (row >= VGA_HEIGHT) row = VGA_HEIGHT - 1;
-    if (col >= VGA_WIDTH)  col = VGA_WIDTH - 1;
-    /* ... bounds-checked write ... */
-}
-```
-### linker.ld
-```ld
-SECTIONS {
-    .text ALIGN(4K) : { *(.text*) }
-    .data ALIGN(4K) : { *(.data*) }
-    .bss ALIGN(4K) : { *(COMMON) *(.bss*) }
-}
-```
-[FIXED] — KERNEL_OFFSET corrected, bounds check added, ALIGN directives added.
-""")
-
-SIM_QA_OUTPUT = textwrap.dedent("""\
-## QA Verification
-| File | Status | Size |
-|------|--------|------|
-| boot.asm | ✅ VALID | 512B |
-| kernel.c | ✅ VALID | 1.2KB |
-| linker.ld | ✅ VALID | 0.3KB |
-- ✅ All files present and complete
-- ✅ Cross-file symbols consistent
-- ✅ No undefined externals
-[VERIFIED]
-""")
-
-SIM_JS_GENERATOR = textwrap.dedent("""\
-## Peter JS — Generated Code
-### server.js
-```javascript
-const express = require('express');
-const app = express();
-const PORT = process.env.PORT || 3000;
-
-app.use(express.json());
-
-// In-memory store
-const tasks = new Map();
-let nextId = 1;
-
-app.get('/api/tasks', (req, res) => {
-  res.json(Array.from(tasks.values()));
-});
-
-app.post('/api/tasks', (req, res) => {
-  const { title, description } = req.body;
-  if (!title) return res.status(400).json({ error: 'title required' });
-  const task = {
-    id: String(nextId++),
-    title,
-    description: description || '',
-    status: 'pending',
-    createdAt: new Date().toISOString()
-  };
-  tasks.set(task.id, task);
-  res.status(201).json(task);
-});
-
-app.get('/api/tasks/:id', (req, res) => {
-  const task = tasks.get(req.params.id);
-  if (!task) return res.status(404).json({ error: 'not found' });
-  res.json(task);
-});
-
-app.put('/api/tasks/:id', (req, res) => {
-  const task = tasks.get(req.params.id);
-  if (!task) return res.status(404).json({ error: 'not found' });
-  Object.assign(task, req.body, { id: task.id, createdAt: task.createdAt });
-  res.json(task);
-});
-
-app.delete('/api/tasks/:id', (req, res) => {
-  if (!tasks.delete(req.params.id)) return res.status(404).json({ error: 'not found' });
-  res.status(204).send();
-});
-
-// Graceful shutdown
-process.on('SIGTERM', () => { server.close(() => process.exit(0)); });
-const server = app.listen(PORT, () => console.log(`Peter JS server on :${PORT}`));
-```
-
-### package.json
-```json
-{
-  "name": "peter-js-task-api",
-  "version": "1.0.0",
-  "main": "server.js",
-  "scripts": { "start": "node server.js", "dev": "node --watch server.js" },
-  "dependencies": { "express": "^4.18.2" }
-}
-```
-
-### test.js
-```javascript
-const assert = require('assert');
-async function runTests() {
-  const base = 'http://localhost:3000/api';
-  // Create
-  const r1 = await fetch(`${base}/tasks`, {
-    method: 'POST', headers: {'Content-Type':'application/json'},
-    body: JSON.stringify({title:'Test task'})
-  });
-  assert.strictEqual(r1.status, 201);
-  const task = await r1.json();
-  assert(task.id);
-  assert.strictEqual(task.title, 'Test task');
-  // Get
-  const r2 = await fetch(`${base}/tasks/${task.id}`);
-  assert.strictEqual(r2.status, 200);
-  // Delete
-  const r3 = await fetch(`${base}/tasks/${task.id}`, {method:'DELETE'});
-  assert.strictEqual(r3.status, 204);
-  console.log('✅ All tests passed');
-}
-runTests().catch(e => { console.error(e); process.exit(1); });
-```
-""")
-
-
 # ═══════════════════════════════════════════════════════════════
 # MULTI-ENDPOINT LLM CLIENT
 # ═══════════════════════════════════════════════════════════════
@@ -601,7 +333,6 @@ runTests().catch(e => { console.error(e); process.exit(1); });
 class MultiLLMClient:
     def __init__(self):
         self.clients: Dict[str, AsyncOpenAI] = {}
-        self.sim_mode: Dict[str, bool] = {}
         self.models: Dict[str, str] = {}
         self.agent_prompts: Dict[str, str] = {}
         self.agent_roles: Dict[str, RoleType] = {}
@@ -610,10 +341,7 @@ class MultiLLMClient:
 
     def register_agent(self, agent: AgentDef):
         key = agent.api_key.strip()
-        if not key:
-            self.sim_mode[agent.agent_id] = True
-        else:
-            self.sim_mode[agent.agent_id] = False
+        if key:
             self.clients[agent.agent_id] = AsyncOpenAI(
                 api_key=key,
                 base_url=agent.base_url.strip() or "https://api.openai.com/v1",
@@ -623,16 +351,34 @@ class MultiLLMClient:
         self.agent_roles[agent.agent_id] = agent.role_type
         self.agent_langs[agent.agent_id] = agent.language
 
-    def is_sim(self, agent_id: str) -> bool:
-        return self.sim_mode.get(agent_id, True)
-
     def unregister(self, agent_id: str):
-        for d in [self.clients, self.sim_mode, self.models, self.agent_prompts,
+        for d in [self.clients, self.models, self.agent_prompts,
                    self.agent_roles, self.agent_langs]:
             d.pop(agent_id, None)
         self.retry_queue.pop(agent_id, None)
 
     # ── Background agent retry (every 30 min) ──
+    def has_key(self, agent_id: str) -> bool:
+        """Check if an agent has a real API key configured."""
+        return agent_id in self.clients
+
+    async def test_connection(self, agent_id: str) -> Tuple[bool, str]:
+        """Test an agent's API connection with a minimal call. Returns (ok, message)."""
+        if agent_id not in self.clients:
+            return False, "No API key configured"
+        try:
+            client = self.clients[agent_id]
+            model = self.models.get(agent_id, "gpt-4")
+            response = await client.chat.completions.create(
+                model=model,
+                messages=[{"role": "user", "content": "PING"}],
+                max_tokens=1,
+                timeout=15,
+            )
+            return True, f"OK — model '{model}' responded"
+        except Exception as e:
+            return False, str(e)[:200]
+
     def __init_retry__(self):
         self.retry_queue: Dict[str, float] = {}  # agent_id -> next_retry_ts
         self.retry_task: Optional[asyncio.Task] = None
@@ -705,22 +451,18 @@ class SwarmEngine:
 
     async def _call_llm(self, agent_id: str, user_content: str,
                         extra_body: Optional[dict] = None) -> AsyncGenerator[str, None]:
-        # Simulation mode ONLY for agents with no API key configured
-        if self.mllm.is_sim(agent_id):
-            for chunk in self._sim_stream(agent_id, user_content):
-                yield chunk
-            return
+        """Call an agent's LLM. Requires a configured API key. Raises on failure."""
+        if not self.mllm.has_key(agent_id):
+            raise Exception(f"Agent '{agent_id}' has no API key — configure one in the Registry tab")
+
+        agent = self.agents.get(agent_id)
+        if agent and agent.status == "degraded":
+            raise Exception(f"Agent '{agent.name}' is degraded — retrying in ~{RETRY_INTERVAL//60} min")
 
         client = self.mllm.clients[agent_id]
         model = self.mllm.models.get(agent_id, "gpt-4")
         system_prompt = self.mllm.agent_prompts.get(agent_id, "")
-        agent = self.agents.get(agent_id)
         lang = (agent.language.value if agent else "any")
-
-        # Check if agent is currently degraded (from a previous failure)
-        if agent and agent.status == "degraded":
-            yield f"\n⚠️ Agent '{agent.name}' is degraded — will retry in ~30 min. Skipping for now.\n"
-            raise Exception(f"Agent {agent_id} is degraded")
 
         messages = [
             {"role": "system", "content": system_prompt.replace("{language}", lang)},
@@ -737,46 +479,16 @@ class SwarmEngine:
                 if chunk.choices and chunk.choices[0].delta.content:
                     yield chunk.choices[0].delta.content
         except openai.RateLimitError:
-            # Rate limit — mark agent degraded, schedule 30-min retry
             if agent:
                 agent.status = "degraded"
             self.mllm.schedule_retry(agent_id, RETRY_INTERVAL)
-            yield f"\n⚠️ RATE LIMITED — Agent marked DEGRADED. Will retry in {RETRY_INTERVAL//60} min. Other agents continue.\n"
-            raise  # Re-raise so caller marks agent as error
+            raise Exception(f"Rate limited — agent degraded, retry in {RETRY_INTERVAL//60} min")
         except Exception as e:
-            # General failure — mark degraded, schedule retry
             if agent:
                 agent.status = "degraded"
             self.mllm.schedule_retry(agent_id, RETRY_INTERVAL)
-            yield f"\n❌ Agent FAILED — marked DEGRADED. Retry in {RETRY_INTERVAL//60} min. Error: {str(e)[:200]}\n"
-            raise
+            raise Exception(f"API failure: {str(e)[:200]}")
 
-    def _sim_stream(self, agent_id: str, _user_content: str):
-        agent = self.agents.get(agent_id)
-        role = agent.role_type if agent else RoleType.CUSTOM
-        lang = agent.language if agent else LangMode.ANY
-
-        sims = {}
-        if lang == LangMode.JAVASCRIPT:
-            sims = {
-                "generator": SIM_JS_GENERATOR,
-                "critic": SIM_CRITIC_APPROVED,
-                "refactorer": "## JS Refactorer\nAll critic issues resolved.\n[FIXED]",
-                "qa": "## JS QA\n- ✅ All files complete\n- ✅ No syntax errors\n- ✅ Tests pass\n[VERIFIED]",
-            }
-        else:
-            sims = {
-                "generator": SIM_ARCHITECT_OUTPUT,
-                "critic": SIM_CRITIC_APPROVED,
-                "refactorer": SIM_REFACTORER_OUTPUT,
-                "qa": SIM_QA_OUTPUT,
-            }
-
-        text = sims.get(role.value, "[no simulation for this role]")
-        for i, ch in enumerate(text):
-            yield ch
-            if i % 5 == 0:
-                time.sleep(0.001)
 
     # ── main swarm loop ──
 
@@ -1278,7 +990,8 @@ def create_ui():
                 edit_model = gr.Textbox(label="Model", placeholder="gpt-4")
             with gr.Row():
                 edit_enabled = gr.Checkbox(label="Enabled", value=True)
-                save_btn = gr.Button("💾 Save Agent", variant="primary", scale=2)
+                save_btn = gr.Button("💾 Save Agent", variant="primary", scale=1)
+                test_conn_btn = gr.Button("🔌 Test Connection", variant="secondary", scale=1)
                 edit_status = gr.Textbox(label="Edit Status", interactive=False, scale=2)
 
             # ── Callbacks ──
@@ -1353,6 +1066,32 @@ def create_ui():
                 MLLM.register_agent(agent)
                 AGENT_REGISTRY[:] = registry
                 return registry, refresh_agent_list(registry), f"💾 Saved: {name} ({aid})"
+
+            async def test_connection_handler(registry, agent_id, key, url, model):
+                if not agent_id.strip():
+                    return "❌ Enter an Agent ID first"
+                aid = agent_id.strip()
+                # Temporarily register if not already
+                if not MLLM.has_key(aid) and key.strip():
+                    MLLM.clients[aid] = AsyncOpenAI(
+                        api_key=key.strip(),
+                        base_url=url.strip() or "https://api.openai.com/v1",
+                    )
+                    MLLM.models[aid] = model.strip() or "gpt-4"
+                ok, msg = await MLLM.test_connection(aid)
+                if ok:
+                    # Mark all agents with this ID as available
+                    for a in registry:
+                        if a.agent_id == aid:
+                            a.status = "available"
+                    return f"✅ CONNECTED: {msg}"
+                return f"❌ FAILED: {msg}"
+
+            test_conn_btn.click(
+                fn=test_connection_handler,
+                inputs=[registry_state, edit_id, edit_key, edit_url, edit_model],
+                outputs=[edit_status],
+            )
 
             refresh_btn.click(fn=lambda r: refresh_agent_list(r),
                               inputs=[registry_state], outputs=[agent_list])
@@ -1437,18 +1176,27 @@ def create_ui():
             gr.Markdown("""### Legend
 - 🟢 **Available** — agent is live and responding
 - 🔴 **Degraded** — agent failed, retrying every 30 min
-- ⚪ **No Key** — running in simulation mode""")
+- ⚠️ **No Key** — add an API key in the Registry tab""")
 
-            def check_health(registry):
+            async def check_health(registry):
                 rows = []
                 for a in registry:
                     if not a.enabled:
                         continue
-                    status_icon = "🟢" if a.status == "available" else "🔴"
-                    sim_label = " (sim)" if MLLM.is_sim(a.agent_id) else ""
+                    has_key = MLLM.has_key(a.agent_id)
+                    if has_key and a.status != "degraded":
+                        status_icon = "🟢"
+                        label = "available"
+                    elif a.status == "degraded":
+                        status_icon = "🔴"
+                        label = "degraded"
+                    else:
+                        status_icon = "⚠️"
+                        label = "no key"
+                    key_info = "" if has_key else " ⚠️"
                     rows.append(
-                        f'<tr><td>{a.emoji} {a.name}{sim_label}</td>'
-                        f'<td>{status_icon} {a.status}</td>'
+                        f'<tr><td>{a.emoji} {a.name}{key_info}</td>'
+                        f'<td>{status_icon} {label}</td>'
                         f'<td>{a.role_type.value}</td>'
                         f'<td>{a.language.value}</td>'
                         f'<td>{a.model or "—"}</td></tr>'
@@ -1460,7 +1208,27 @@ def create_ui():
                 {"".join(rows)}</table>
                 <p style="color:#94a3b8;font-size:0.75rem;margin-top:10px;">⏰ Degraded agents retry every {RETRY_INTERVAL//60} minutes</p>'''
 
-            refresh_health_btn.click(fn=check_health, inputs=[registry_state], outputs=[health_status])
+            async def test_all_connections(registry):
+                results = []
+                for a in registry:
+                    if a.enabled and MLLM.has_key(a.agent_id):
+                        ok, msg = await MLLM.test_connection(a.agent_id)
+                        if ok:
+                            a.status = "available"
+                            results.append(f"✅ {a.name}: connected")
+                        else:
+                            a.status = "degraded"
+                            results.append(f"❌ {a.name}: {msg[:80]}")
+                    elif a.enabled:
+                        results.append(f"⚠️ {a.name}: no API key")
+                return await check_health(registry), "\n".join(results)
+
+            with gr.Row():
+                refresh_health_btn.click(fn=check_health, inputs=[registry_state], outputs=[health_status])
+                test_all_btn = gr.Button("🔌 Test All Connections", variant="secondary")
+                health_feedback = gr.Textbox(label="Test Results", interactive=False, lines=3)
+            test_all_btn.click(fn=test_all_connections, inputs=[registry_state],
+                              outputs=[health_status, health_feedback])
 
         # ═══ Tab 5: About ═══
         with gr.Tab("ℹ️ About"):
@@ -1483,7 +1251,7 @@ User Prompt → ALL Generators (parallel)
 - **Multi-Language** — ASM/C, Python, JavaScript (Peter JS)
 - **Parallel Execution** — All agents at each stage run concurrently
 - **API Console** — Per-agent API keys for any OpenAI-compatible provider
-- **Simulation Mode** — Works without API keys with pre-recorded outputs
+- **Real Models Only** — Every agent requires a working API key
 
 ### Peter JS
 A specialized JavaScript/Node.js agent that generates production-grade JS code:
@@ -1491,6 +1259,11 @@ A specialized JavaScript/Node.js agent that generates production-grade JS code:
 - Browser APIs, DOM manipulation
 - Build tooling (Webpack, Vite, esbuild)
 - Puppeteer/Playwright automation
+
+### Real API Verification
+- 🔌 **Test Connection** — Validate any agent's API key with a live PING call
+- 🔌 **Test All** — Bulk-test every registered agent's endpoint
+- 💓 **Health Dashboard** — Live status: 🟢 available | 🔴 degraded | ⚠️ no key
 """)
 
         # ── Main swarm runner ──
