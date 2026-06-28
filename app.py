@@ -17,6 +17,7 @@ import re
 import sys
 import textwrap
 import time
+import requests
 import traceback
 import uuid
 from dataclasses import dataclass, field
@@ -197,9 +198,57 @@ def build_default_agents() -> List[AgentDef]:
     ]
 
 
+
+# ═══════════════════════════════════════════════════════════════
+# RATE-LIMIT RETRY UTILITY
+# ═══════════════════════════════════════════════════════════════
+
+def call_free_api_with_retry(api_url: str, headers: dict, payload: dict,
+                              max_retries: int = RATE_LIMIT_MAX_RETRIES,
+                              base_delay: float = RATE_LIMIT_BASE_DELAY) -> dict:
+    """Calls a free frontier API and automatically sleeps if rate limits are hit.
+    Uses exponential backoff: 5s → 10s → 20s → 40s → 80s."""
+    delay = base_delay
+    last_error = None
+
+    for attempt in range(max_retries):
+        try:
+            response = requests.post(api_url, json=payload, headers=headers, timeout=120)
+
+            if response.status_code == 429:
+                print(f"⚠️ Rate limit hit (attempt {attempt+1}/{max_retries}). "
+                      f"Sleeping {delay}s...")
+                time.sleep(delay)
+                delay *= 2  # Exponential backoff
+                continue
+
+            if response.status_code == 200:
+                return response.json()
+
+            # Non-200, non-429 — still retryable
+            last_error = f"HTTP {response.status_code}: {response.text[:200]}"
+            print(f"⚠️ API error (attempt {attempt+1}/{max_retries}): {last_error}")
+            time.sleep(delay)
+            delay *= 2
+
+        except requests.exceptions.Timeout:
+            last_error = "Request timeout"
+            print(f"⚠️ Timeout (attempt {attempt+1}/{max_retries}). Retrying in {delay}s...")
+            time.sleep(delay)
+            delay *= 2
+        except requests.exceptions.ConnectionError as e:
+            last_error = f"Connection error: {e}"
+            print(f"⚠️ Connection error (attempt {attempt+1}/{max_retries}). Retrying in {delay}s...")
+            time.sleep(delay)
+            delay *= 2
+
+    raise Exception(f"❌ Failed after {max_retries} retries. Last error: {last_error}")
+
+
 # ═══════════════════════════════════════════════════════════════
 # DATA STRUCTURES
 # ═══════════════════════════════════════════════════════════════
+
 
 @dataclass
 class AgentLog:
@@ -607,6 +656,27 @@ class SwarmEngine:
             async for chunk in stream:
                 if chunk.choices and chunk.choices[0].delta.content:
                     yield chunk.choices[0].delta.content
+        except openai.RateLimitError as e:
+            # Rate limit hit — retry with exponential backoff
+            delay = RATE_LIMIT_BASE_DELAY
+            for rtry in range(RATE_LIMIT_MAX_RETRIES):
+                yield f"\n⚠️ Rate limit hit (retry {rtry+1}/{RATE_LIMIT_MAX_RETRIES}) — waiting {delay}s...\n"
+                await asyncio.sleep(delay)
+                delay *= 2
+                try:
+                    stream = await client.chat.completions.create(**kwargs)
+                    async for chunk in stream:
+                        if chunk.choices and chunk.choices[0].delta.content:
+                            yield chunk.choices[0].delta.content
+                    return
+                except openai.RateLimitError:
+                    continue
+                except Exception as e2:
+                    yield f"\n\n❌ API Error [{agent_id}] after retries: {str(e2)}\n"
+                    break
+            yield f"\n\n❌ Rate limit persisted after {RATE_LIMIT_MAX_RETRIES} retries. Falling back to simulation...\n\n"
+            for chunk in self._sim_stream(agent_id, user_content):
+                yield chunk
         except Exception as e:
             yield f"\n\n❌ API Error [{agent_id}]: {str(e)}\nFalling back to simulation...\n\n"
             for chunk in self._sim_stream(agent_id, user_content):
