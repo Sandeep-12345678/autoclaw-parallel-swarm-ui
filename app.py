@@ -1210,8 +1210,7 @@ def build_agent_edit_ui() -> List[gr.components.Component]:
 
 
 def create_ui():
-    with gr.Blocks(css=CUSTOM_CSS,
-                   theme=gr.themes.Soft(primary_hue="blue", secondary_hue="slate"),
+    with gr.Blocks(
                    title="AutoClaw Unlimited Swarm Orchestrator") as demo:
 
         registry_state = gr.State(AGENT_REGISTRY)
@@ -1537,22 +1536,20 @@ A specialized JavaScript/Node.js agent that generates production-grade JS code:
         )
         stop_btn.click(fn=None, cancels=[run_event])
 
-    # ── Download handler ──
-    def build_download(registry):
-        """Build a downloadable zip of all virtual files from the last swarm."""
-        import io, zipfile
-        buf = io.BytesIO()
-        with zipfile.ZipFile(buf, 'w', zipfile.ZIP_DEFLATED) as zf:
-            # We need access to the last swarm's virtual FS
-            # For now, generate a placeholder
-            zf.writestr('README.txt',
-                'AutoClaw Swarm Output\n'
-                'Run a swarm to generate code files.\n'
-                'Files will appear here after execution.\n')
-        buf.seek(0)
-        return buf
+        # ── Download handler (inside Blocks context) ──
+        def build_download(registry):
+            """Build a downloadable zip of all virtual files from the last swarm."""
+            import io, zipfile
+            buf = io.BytesIO()
+            with zipfile.ZipFile(buf, 'w', zipfile.ZIP_DEFLATED) as zf:
+                zf.writestr('README.txt',
+                    'AutoClaw Swarm Output\n'
+                    'Run a swarm to generate code files.\n'
+                    'Files will appear here after execution.\n')
+            buf.seek(0)
+            return buf
 
-    download_btn.click(fn=build_download, inputs=[registry_state], outputs=[download_file])
+        download_btn.click(fn=build_download, inputs=[registry_state], outputs=[download_file])
 
     return demo
 
@@ -1613,7 +1610,14 @@ def _escape_html(text: str) -> str:
 def main():
     demo = create_ui()
     demo.queue(default_concurrency_limit=5, max_size=20)
-    demo.launch(server_name="0.0.0.0", server_port=7860, share=False, show_error=True)
+    demo.launch(
+        server_name="0.0.0.0",
+        server_port=7860,
+        share=False,
+        show_error=True,
+        css=CUSTOM_CSS,
+        theme=gr.themes.Soft(primary_hue="blue", secondary_hue="slate"),
+    )
 
 if __name__ == "__main__":
     main()
