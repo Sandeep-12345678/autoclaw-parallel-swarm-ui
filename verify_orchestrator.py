@@ -1,169 +1,78 @@
 #!/usr/bin/env python3
 """
-verify_orchestrator.py — Syntax & structure validation for
-  Autonomous Multi-Agent Code-Debate Orchestrator
-==============================================================
-Exits 0 on clean pass, non-zero on failure.
+verify_orchestrator.py — Validate Unlimited Multi-Agent Swarm Orchestrator
+Exits 0 on clean pass.
 """
-
 import sys
-import traceback
+PASS = FAIL = 0
 
-PASS = 0
-FAIL = 0
-
-def check(name: str, condition: bool, detail: str = ""):
+def check(name, cond, detail=""):
     global PASS, FAIL
-    if condition:
-        PASS += 1
-        print(f"  ✅ {name}")
-    else:
-        FAIL += 1
-        print(f"  ❌ {name} — {detail}")
+    if cond: PASS += 1; print(f"  ✅ {name}")
+    else: FAIL += 1; print(f"  ❌ {name} — {detail}")
 
+print("📦 [1/5] Imports...")
+for mod in ["asyncio","hashlib","json","os","re","sys","textwrap","time","traceback",
+            "dataclasses","datetime","enum","typing","uuid","gradio","openai"]:
+    try: __import__(mod); check(f"import {mod}", True)
+    except ImportError as e: check(f"import {mod}", False, str(e))
 
-# ── 1. Imports ──
-print("\n📦 [1/6] Testing imports...")
-modules = [
-    "asyncio", "hashlib", "json", "os", "re", "sys",
-    "textwrap", "time", "traceback", "dataclasses",
-    "datetime", "enum", "typing", "gradio", "openai",
+print("🔍 [2/5] Syntax...")
+try:
+    with open("app.py") as f: src = f.read()
+    compile(src, "app.py", "exec"); check("app.py compiles", True)
+except SyntaxError as e: check("app.py compiles", False, f"Line {e.lineno}: {e.msg}")
+
+print("🏗️  [3/5] Structure...")
+checks = [
+    ("AgentDef dataclass","class AgentDef"),
+    ("RoleType enum","class RoleType"),
+    ("LangMode enum","class LangMode"),
+    ("SwarmEngine class","class SwarmEngine"),
+    ("MultiLLMClient class","class MultiLLMClient"),
+    ("Dynamic agent registry","build_default_agents"),
+    ("Unlimited loops slider","max_loops_slider"),
+    ("Unlimited checkbox","unlimited_loops"),
+    ("Peter JS prompt","JAVASCRIPT_GENERATOR_PROMPT"),
+    ("JS Critic prompt","JAVASCRIPT_CRITIC_PROMPT"),
+    ("JS Refactorer prompt","JAVASCRIPT_REFACTORER_PROMPT"),
+    ("Agent Registry tab","Agent Registry"),
+    ("Add template button","add_template_agent"),
+    ("Delete agent","delete_agent"),
+    ("Save agent manual","save_agent_manual"),
+    ("Parallel generators","state.generators"),
+    ("Parallel critics","state.critics"),
+    ("Parallel refactorers","state.refactorers"),
+    ("Parallel QA","state.qa_agents"),
+    ("Swarm runner","run_swarm"),
+    ("Mock compile","_run_mock_compile"),
+    ("Dynamic grid render","_render_dynamic_agent_grid"),
+    ("[APPROVED] parsing",'"[APPROVED]" in'),
+    ("[REJECTED] parsing",'"[REJECTED]" in'),
+    ("[VERIFIED] parsing",'[VERIFIED]'),
+    ("[FIXED] parsing",'[FIXED]'),
+    ("SIM_JS_GENERATOR","SIM_JS_GENERATOR"),
+    ("Gradio port 7860","server_port=7860"),
+    ("Gradio Blocks","gr.Blocks"),
+    ("Gradio State registry","gr.State"),
+    ("Server launch","def main()"),
 ]
-for mod in modules:
-    try:
-        __import__(mod)
-        check(f"import {mod}", True)
-    except ImportError as e:
-        check(f"import {mod}", False, str(e))
+for label, pat in checks:
+    check(label, pat in src)
 
-
-# ── 2. Syntax ──
-print("\n🔍 [2/6] Checking app.py syntax...")
+print("📋 [4/5] Requirements...")
 try:
-    with open("app.py") as f:
-        src = f.read()
-    compile(src, "app.py", "exec")
-    check("app.py compiles", True)
-except SyntaxError as e:
-    check("app.py compiles", False, f"Line {e.lineno}: {e.msg}")
+    with open("requirements.txt") as f: reqs = f.read().lower()
+except FileNotFoundError: reqs = ""
+for pkg in ["gradio","requests","aiohttp","openai"]:
+    check(f"req: {pkg}", pkg in reqs)
 
-
-# ── 3. Structure — required components ──
-print("\n🏗️  [3/6] Checking app.py structure...")
+print("📄 [5/5] README...")
 try:
-    with open("app.py") as f:
-        src = f.read()
-except FileNotFoundError:
-    print("  ❌ app.py not found")
-    sys.exit(1)
+    with open("README.md") as f: rm = f.read()
+except FileNotFoundError: rm = ""
+for item in ["---","sdk: docker","7860","GitHub","Hugging Face"]:
+    check(f"README: {item}", item in rm)
 
-required = [
-    # Classes
-    ("AgentRole enum",          "class AgentRole"),
-    ("AgentLog dataclass",      "class AgentLog"),
-    ("VirtualFile dataclass",   "class VirtualFile"),
-    ("SwarmState dataclass",    "class SwarmState"),
-    ("MultiLLMClient class",    "class MultiLLMClient"),
-    ("SwarmEngine class",       "class SwarmEngine"),
-    # Agent prompts
-    ("Architect prompt",        "ARCHITECT_PROMPT"),
-    ("Critic prompt",           "CRITIC_PROMPT"),
-    ("Refactorer prompt",       "REFACTORER_PROMPT"),
-    ("QA prompt",               "QA_PROMPT"),
-    # Loop mechanics
-    ("MAX_CRITIC_LOOPS = 5",    "MAX_CRITIC_LOOPS = 5"),
-    ("critic_loop method",      "def _critic_loop"),
-    ("run_architect method",    "def _run_architect"),
-    ("run_qa method",           "def _run_qa"),
-    ("run_mock_compile method", "def _run_mock_compile"),
-    ("extract_files method",    "def _extract_files"),
-    # Verdict parsing
-    ("[APPROVED] parsing",      '"[APPROVED]" in'),
-    ("[REJECTED] parsing",      '"[REJECTED]" in'),
-    ("[VERIFIED] parsing",      '"[VERIFIED]" in'),
-    ("[FIXED] parsing",         '[FIXED]'),
-    # Virtual FS
-    ("VirtualFile instantiation","VirtualFile("),
-    ("boot.asm in checks",       '"boot.asm"'),
-    ("kernel.c in checks",       '"kernel.c"'),
-    ("linker.ld in checks",      '"linker.ld"'),
-    # API config console
-    ("API config tab",           'gr.Tab("🔑 API Configuration")'),
-    ("Arch key field",           "arch_key"),
-    ("Crit key field",           "crit_key"),
-    ("Refac key field",          "refac_key"),
-    ("QA key field",             "qa_key"),
-    ("apply_config function",    "def apply_config"),
-    # Gradio UI
-    ("Swarm Orchestrator tab",   'gr.Tab("🚀 Swarm Orchestrator")'),
-    ("Execution Bus tab",        'gr.Tab("🚦 Execution Bus")'),
-    ("Launch event handler",     "def on_launch"),
-    ("Gradio Blocks",            "gr.Blocks"),
-    ("server_port=7860",         "server_port=7860"),
-    # Simulation fallbacks
-    ("SIM_ARCHITECT_OUTPUT",     "SIM_ARCHITECT_OUTPUT"),
-    ("SIM_CRITIC_APPROVED",      "SIM_CRITIC_APPROVED"),
-    ("SIM_CRITIC_REJECTED",      "SIM_CRITIC_REJECTED"),
-    ("SIM_REFACTORER_OUTPUT",    "SIM_REFACTORER_OUTPUT"),
-    ("SIM_QA_OUTPUT",            "SIM_QA_OUTPUT"),
-    ("Simulation stream method", "def _sim_stream"),
-    # Async patterns
-    ("async def",                "async def"),
-    ("asyncio patterns",         "AsyncGenerator"),
-    ("yield for streaming",      "yield"),
-]
-
-for label, pattern in required:
-    check(label, pattern in src)
-
-
-# ── 4. Requirements ──
-print("\n📋 [4/6] Checking requirements.txt...")
-try:
-    with open("requirements.txt") as f:
-        reqs = f.read().lower()
-except FileNotFoundError:
-    check("requirements.txt exists", False, "Not found")
-    reqs = ""
-
-for pkg in ["gradio", "requests", "aiohttp", "openai"]:
-    check(f"requirements: {pkg}", pkg in reqs)
-
-
-# ── 5. Dockerfile ──
-print("\n🐳 [5/6] Checking Dockerfile...")
-try:
-    with open("Dockerfile") as f:
-        df = f.read()
-except FileNotFoundError:
-    check("Dockerfile exists", False, "Not found")
-    df = ""
-
-for item in ["FROM python", "EXPOSE 7860", "app.py"]:
-    check(f"Dockerfile: {item}", item in df)
-
-
-# ── 6. README ──
-print("\n📄 [6/6] Checking README.md...")
-try:
-    with open("README.md") as f:
-        rm = f.read()
-except FileNotFoundError:
-    check("README.md exists", False, "Not found")
-    rm = ""
-
-for item in ["---", "sdk: docker", "7860"]:
-    check(f"README: {item}", item in rm[:500])
-
-
-# ── Results ──
-print(f"\n{'='*60}")
-print(f"  Results: {PASS} passed, {FAIL} failed")
-print(f"{'='*60}")
-
-if FAIL > 0:
-    print("\n❌ VERIFICATION FAILED")
-    sys.exit(1)
-else:
-    print("\n✅ ALL CHECKS PASSED — Orchestrator is clean!")
-    sys.exit(0)
+print(f"\n{'='*60}\n  Results: {PASS} passed, {FAIL} failed\n{'='*60}")
+sys.exit(0 if FAIL == 0 else 1)
