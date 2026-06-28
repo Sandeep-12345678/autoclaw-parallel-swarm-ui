@@ -23,10 +23,21 @@ import uuid
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from enum import Enum
-from typing import Any, AsyncGenerator, Callable, Dict, List, Optional, Tuple
+from typing import Any, AsyncGenerator, Callable, Dict, List, Optional, Set, Tuple
 
 import gradio as gr
 from openai import AsyncOpenAI
+
+
+# ═══════════════════════════════════════════════════════════════
+# CONFIGURATION
+# ═══════════════════════════════════════════════════════════════
+
+MAX_CRITIC_LOOPS_DEFAULT = 5
+DEFAULT_MAX_TOKENS = 8192
+RATE_LIMIT_MAX_RETRIES = 5
+RATE_LIMIT_BASE_DELAY = 5
+RETRY_INTERVAL = 1800  # 30 minutes — retry degraded agents
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -61,6 +72,7 @@ class AgentDef:
     model: str = ""
     enabled: bool = True
     thinking_effort: str = "default"  # "default" | "max"
+    status: str = "available"  # "available" | "degradated" | "offline"
 
     def to_dict(self) -> dict:
         return {
@@ -594,6 +606,7 @@ class MultiLLMClient:
         self.agent_prompts: Dict[str, str] = {}
         self.agent_roles: Dict[str, RoleType] = {}
         self.agent_langs: Dict[str, LangMode] = {}
+        self.__init_retry__()
 
     def register_agent(self, agent: AgentDef):
         key = agent.api_key.strip()
@@ -614,8 +627,60 @@ class MultiLLMClient:
         return self.sim_mode.get(agent_id, True)
 
     def unregister(self, agent_id: str):
-        for d in [self.clients, self.sim_mode, self.models, self.agent_prompts, self.agent_roles, self.agent_langs]:
+        for d in [self.clients, self.sim_mode, self.models, self.agent_prompts,
+                   self.agent_roles, self.agent_langs]:
             d.pop(agent_id, None)
+        self.retry_queue.pop(agent_id, None)
+
+    # ── Background agent retry (every 30 min) ──
+    def __init_retry__(self):
+        self.retry_queue: Dict[str, float] = {}  # agent_id -> next_retry_ts
+        self.retry_task: Optional[asyncio.Task] = None
+        self.agent_registry_ref: List[AgentDef] = []
+
+    def schedule_retry(self, agent_id: str, interval_seconds: int = 1800):
+        """Schedule a degraded agent for retry after interval_seconds."""
+        self.retry_queue[agent_id] = time.time() + interval_seconds
+        if self.retry_task is None or self.retry_task.done():
+            self.retry_task = asyncio.create_task(self._retry_loop())
+
+    async def _retry_loop(self):
+        """Background loop: every 60s, check if any degraded agent is due for retry."""
+        while self.retry_queue:
+            await asyncio.sleep(60)  # Check every minute
+            now = time.time()
+            for agent_id, next_ts in list(self.retry_queue.items()):
+                if now >= next_ts:
+                    # Try to revive the agent
+                    success = await self._try_revive_agent(agent_id)
+                    if success:
+                        del self.retry_queue[agent_id]
+
+    async def _try_revive_agent(self, agent_id: str) -> bool:
+        """Attempt to revive a degraded agent by making a test call."""
+        if agent_id not in self.clients:
+            return False
+        try:
+            client = self.clients[agent_id]
+            model = self.models.get(agent_id, "gpt-4")
+            response = await client.chat.completions.create(
+                model=model,
+                messages=[{"role": "user", "content": "PING"}],
+                max_tokens=1,
+                timeout=15,
+            )
+            # Agent is back! Mark as available
+            for agent in self.agent_registry_ref:
+                if agent.agent_id == agent_id:
+                    agent.status = "available"
+                    print(f"✅ Agent '{agent.name}' REVIVED — back online")
+                    return True
+            return True
+        except Exception:
+            # Still down — re-schedule for next 30-min window
+            self.retry_queue[agent_id] = time.time() + RETRY_INTERVAL
+            print(f"⏳ Agent '{agent_id}' still degraded — retry in {RETRY_INTERVAL//60} min")
+            return False
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -631,6 +696,7 @@ class SwarmEngine:
 
     async def _call_llm(self, agent_id: str, user_content: str,
                         extra_body: Optional[dict] = None) -> AsyncGenerator[str, None]:
+        # Simulation mode ONLY for agents with no API key configured
         if self.mllm.is_sim(agent_id):
             for chunk in self._sim_stream(agent_id, user_content):
                 yield chunk
@@ -641,6 +707,11 @@ class SwarmEngine:
         system_prompt = self.mllm.agent_prompts.get(agent_id, "")
         agent = self.agents.get(agent_id)
         lang = (agent.language.value if agent else "any")
+
+        # Check if agent is currently degraded (from a previous failure)
+        if agent and agent.status == "degraded":
+            yield f"\n⚠️ Agent '{agent.name}' is degraded — will retry in ~30 min. Skipping for now.\n"
+            raise Exception(f"Agent {agent_id} is degraded")
 
         messages = [
             {"role": "system", "content": system_prompt.replace("{language}", lang)},
@@ -656,31 +727,20 @@ class SwarmEngine:
             async for chunk in stream:
                 if chunk.choices and chunk.choices[0].delta.content:
                     yield chunk.choices[0].delta.content
-        except openai.RateLimitError as e:
-            # Rate limit hit — retry with exponential backoff
-            delay = RATE_LIMIT_BASE_DELAY
-            for rtry in range(RATE_LIMIT_MAX_RETRIES):
-                yield f"\n⚠️ Rate limit hit (retry {rtry+1}/{RATE_LIMIT_MAX_RETRIES}) — waiting {delay}s...\n"
-                await asyncio.sleep(delay)
-                delay *= 2
-                try:
-                    stream = await client.chat.completions.create(**kwargs)
-                    async for chunk in stream:
-                        if chunk.choices and chunk.choices[0].delta.content:
-                            yield chunk.choices[0].delta.content
-                    return
-                except openai.RateLimitError:
-                    continue
-                except Exception as e2:
-                    yield f"\n\n❌ API Error [{agent_id}] after retries: {str(e2)}\n"
-                    break
-            yield f"\n\n❌ Rate limit persisted after {RATE_LIMIT_MAX_RETRIES} retries. Falling back to simulation...\n\n"
-            for chunk in self._sim_stream(agent_id, user_content):
-                yield chunk
+        except openai.RateLimitError:
+            # Rate limit — mark agent degraded, schedule 30-min retry
+            if agent:
+                agent.status = "degraded"
+            self.mllm.schedule_retry(agent_id, RETRY_INTERVAL)
+            yield f"\n⚠️ RATE LIMITED — Agent marked DEGRADED. Will retry in {RETRY_INTERVAL//60} min. Other agents continue.\n"
+            raise  # Re-raise so caller marks agent as error
         except Exception as e:
-            yield f"\n\n❌ API Error [{agent_id}]: {str(e)}\nFalling back to simulation...\n\n"
-            for chunk in self._sim_stream(agent_id, user_content):
-                yield chunk
+            # General failure — mark degraded, schedule retry
+            if agent:
+                agent.status = "degraded"
+            self.mllm.schedule_retry(agent_id, RETRY_INTERVAL)
+            yield f"\n❌ Agent FAILED — marked DEGRADED. Retry in {RETRY_INTERVAL//60} min. Error: {str(e)[:200]}\n"
+            raise
 
     def _sim_stream(self, agent_id: str, _user_content: str):
         agent = self.agents.get(agent_id)
@@ -840,14 +900,28 @@ class SwarmEngine:
         if agent.thinking_effort == "max":
             extra = {"thinking": {"type": "enabled"}}
 
-        async for token in self._call_llm(agent_id, prompt, extra):
-            buf.append(token)
-            log.lines.append(token)
+        try:
+            async for token in self._call_llm(agent_id, prompt, extra):
+                buf.append(token)
+                log.lines.append(token)
+            log.status = "done"
+            log.end_ts = time.time()
+            state.log(f"{agent.emoji} {agent.name} done — {len(buf)} tokens")
+        except Exception as e:
+            log.status = "error"
+            log.end_ts = time.time()
+            log.error_msg = str(e)[:300]
+            log.lines.append(f"\n❌ AGENT FAILED: {log.error_msg}")
+            log.lines.append(f"\n⏳ Will retry in {RETRY_INTERVAL//60} min. Other agents continue.")
+            state.log(f"❌ {agent.emoji} {agent.name} FAILED — degraded. Swarm continues.")
+            # Mark agent as degraded in registry
+            for a in MLLM.agent_registry_ref:
+                if a.agent_id == agent_id:
+                    a.status = "degraded"
+                    break
 
-        log.status = "done"
-        log.end_ts = time.time()
-        state.log(f"{agent.emoji} {agent.name} done — {len(buf)} tokens")
-        yield self._build_ui_state(state, f"{agent.emoji} {agent.name} done")
+        yield self._build_ui_state(state,
+            f"{agent.emoji} {agent.name} {'✅ done' if log.status == 'done' else '❌ degraded'}")
 
     async def _collect_stream(self, state: SwarmState, agent_id: str,
                                prompt: str, extra: Optional[dict]) -> str:
@@ -857,10 +931,16 @@ class SwarmEngine:
         log.start_ts = time.time()
         log.lines = []
         buf = []
-        async for token in self._call_llm(agent_id, prompt, extra):
-            buf.append(token)
-            log.lines.append(token)
-        log.status = "done"
+        try:
+            async for token in self._call_llm(agent_id, prompt, extra):
+                buf.append(token)
+                log.lines.append(token)
+            log.status = "done"
+        except Exception as e:
+            log.status = "error"
+            log.error_msg = str(e)[:300]
+            log.lines.append(f"\n❌ AGENT FAILED: {log.error_msg}")
+            log.lines.append(f"\n⏳ Will retry in {RETRY_INTERVAL//60} min.")
         log.end_ts = time.time()
         return "".join(buf)
 
@@ -949,7 +1029,7 @@ class SwarmEngine:
                 continue
             icon = {"idle":"⏳","running":"🔄","done":"✅","error":"❌"}.get(log.status,"❓")
             rows.append(
-                f'<tr><td>{agent.emoji} {agent.name}</td>'
+                f'<tr><td>{agent.emoji} {agent.name}</td>'f'<td style="color:{"#22c55e" if agent.status=="available" else "#ef4444"}">{"🟢" if agent.status=="available" else "🔴"} {agent.status}</td>'
                 f'<td>{icon} {log.status}</td>'
                 f'<td>{log.elapsed}</td>'
                 f'<td>{log.verdict}</td></tr>'
@@ -964,7 +1044,7 @@ class SwarmEngine:
         return f"""<h3>🚦 Execution Bus — <code>{state.task_id}</code></h3>
 <p>Phase: <b>{state.phase}</b> | Loop: <b>{state.loop_count}/{state.max_loops}</b> | Verdict: <b>{state.verdict}</b></p>
 <table style="width:100%;border-collapse:collapse;color:#e2e8f0;font-size:0.82rem;">
-<tr style="background:#1e293b;"><th>Agent</th><th>Status</th><th>Time</th><th>Verdict</th></tr>
+<tr style="background:#1e293b;"><th>Agent</th><th>Health</th><th>Status</th><th>Time</th><th>Verdict</th></tr>
 {''.join(rows)}
 </table>
 <br/><h4>💾 Virtual FS</h4>
@@ -1028,6 +1108,7 @@ h1,h2,h3,h4 { color:#f1f5f9!important; }
 # Agent registry persisted in Gradio State
 AGENT_REGISTRY: List[AgentDef] = build_default_agents()
 MLLM = MultiLLMClient()
+MLLM.agent_registry_ref = AGENT_REGISTRY  # Wire for retry revival
 for a in AGENT_REGISTRY:
     MLLM.register_agent(a)
 
