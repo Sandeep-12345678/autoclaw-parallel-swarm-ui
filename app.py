@@ -637,17 +637,25 @@ class MultiLLMClient:
         self.retry_queue: Dict[str, float] = {}  # agent_id -> next_retry_ts
         self.retry_task: Optional[asyncio.Task] = None
         self.agent_registry_ref: List[AgentDef] = []
+        self._retry_loop_started = False
+
+    def ensure_retry_loop(self):
+        """Start the retry loop if not already running."""
+        if not self._retry_loop_started and (self.retry_task is None or self.retry_task.done()):
+            self.retry_task = asyncio.ensure_future(self._retry_loop())
+            self._retry_loop_started = True
 
     def schedule_retry(self, agent_id: str, interval_seconds: int = 1800):
         """Schedule a degraded agent for retry after interval_seconds."""
         self.retry_queue[agent_id] = time.time() + interval_seconds
-        if self.retry_task is None or self.retry_task.done():
-            self.retry_task = asyncio.create_task(self._retry_loop())
+        self.ensure_retry_loop()
 
     async def _retry_loop(self):
         """Background loop: every 60s, check if any degraded agent is due for retry."""
-        while self.retry_queue:
+        while True:
             await asyncio.sleep(60)  # Check every minute
+            if not self.retry_queue:
+                continue
             now = time.time()
             for agent_id, next_ts in list(self.retry_queue.items()):
                 if now >= next_ts:
@@ -655,6 +663,7 @@ class MultiLLMClient:
                     success = await self._try_revive_agent(agent_id)
                     if success:
                         del self.retry_queue[agent_id]
+                        print(f"✅ Agent {agent_id} revived and removed from retry queue")
 
     async def _try_revive_agent(self, agent_id: str) -> bool:
         """Attempt to revive a degraded agent by making a test call."""
@@ -718,7 +727,7 @@ class SwarmEngine:
             {"role": "user", "content": user_content},
         ]
         kwargs = {"model": model, "messages": messages,
-                  "max_tokens": 8192, "stream": True}
+                  "max_tokens": 8192, "stream": True, "timeout": 120}
         if extra_body:
             kwargs["extra_body"] = extra_body
 
@@ -794,14 +803,38 @@ class SwarmEngine:
                   f"{len(state.critics)} critics, {len(state.refactorers)} refactorers, "
                   f"{len(state.qa_agents)} QA, max {max_loops} loops")
 
-        # ── Phase 1: All generators run in parallel ──
+        # ── Phase 1: All generators run in TRUE parallel ──
         state.phase = "generators"
-        for aid in state.generators:
-            async for result in self._run_single_agent(state, aid, "generating code",
-                                              task_prompt):
+        gen_count = len(state.generators)
+        state.log(f"⚡ Launching {gen_count} generator(s) in parallel")
+        yield self._build_ui_state(state, f"⚡ {gen_count} generators running in parallel...")
 
-                yield result
+        gen_results = {}
+        async def run_gen(aid):
+            buf = []
+            try:
+                async for token in self._call_llm(aid, task_prompt, {}):
+                    buf.append(token)
+                    state.agent_logs[aid].lines.append(token)
+            except Exception as e:
+                state.agent_logs[aid].status = "error"
+                state.agent_logs[aid].error_msg = str(e)[:200]
+                return
+            state.agent_logs[aid].status = "done"
+            state.agent_logs[aid].end_ts = time.time()
+            state.agent_logs[aid].lines = buf
+
+        tasks = [asyncio.ensure_future(run_gen(aid)) for aid in state.generators]
+        while not all(t.done() for t in tasks):
+            done = sum(1 for t in tasks if t.done())
+            yield self._build_ui_state(state, f"⚡ Generators: {done}/{gen_count} complete")
+            await asyncio.sleep(0.3)
+        await asyncio.gather(*tasks, return_exceptions=True)
+
         self._extract_all_files(state)
+        ok = sum(1 for aid in state.generators if state.agent_logs[aid].status == "done")
+        state.log(f"✅ {ok}/{gen_count} generators complete")
+        yield self._build_ui_state(state, f"✅ {ok}/{gen_count} generators complete")
 
         # ── Phase 2: Critic loop (max N) ──
         for loop_idx in range(1, max_loops + 1):
@@ -813,15 +846,24 @@ class SwarmEngine:
             all_approved = True
             any_verdict = False
 
-            for aid in state.critics:
+                        # Run all critics in parallel
+            async def run_one_critic(aid):
                 agent = self.agents[aid]
                 extra = {}
                 if agent.thinking_effort == "max":
                     extra = {"thinking": {"type": "enabled"}}
-                full = await self._collect_stream(
+                return aid, await self._collect_stream(
                     state, aid, f"Review this code:\n\n{code_snap}", extra)
-                any_verdict = True
 
+            critic_tasks_list = [asyncio.ensure_future(run_one_critic(aid)) for aid in state.critics]
+            yield self._build_ui_state(state, f"🔍 {len(state.critics)} critics in parallel (loop {loop_idx})...")
+            critic_results = await asyncio.gather(*critic_tasks_list, return_exceptions=True)
+
+            for result in critic_results:
+                if isinstance(result, Exception):
+                    continue
+                aid, full = result
+                any_verdict = True
                 if "[APPROVED]" in full:
                     state.agent_logs[aid].verdict = "APPROVED"
                 elif "[REJECTED]" in full:
@@ -830,6 +872,8 @@ class SwarmEngine:
                 else:
                     state.agent_logs[aid].verdict = "NONE"
                     all_approved = False
+
+
 
             yield self._build_ui_state(state, f"🔍 Critics done (loop {loop_idx})")
 
@@ -849,11 +893,26 @@ class SwarmEngine:
             # ── Refactor if rejected and loops remain ──
             if loop_idx < max_loops:
                 state.phase = "refactorer"
-                for aid in state.refactorers:
-                    async for result in self._run_single_agent(state, aid,
-                        f"refactoring (loop {loop_idx})",
-                        f"Original:\n{code_snap}\n\nFix all REJECTED issues."):
-                        yield result
+                                # Run all refactorers in parallel
+                async def run_refac(aid):
+                    buf = []
+                    try:
+                        async for token in self._call_llm(aid,
+                            f"Original:\n{code_snap}\n\nFix all REJECTED issues.", {}):
+                            buf.append(token)
+                            state.agent_logs[aid].lines.append(token)
+                        state.agent_logs[aid].status = "done"
+                    except Exception as e:
+                        state.agent_logs[aid].status = "error"
+                        state.agent_logs[aid].error_msg = str(e)[:200]
+                    state.agent_logs[aid].end_ts = time.time()
+
+                refac_tasks_list = [asyncio.ensure_future(run_refac(aid)) for aid in state.refactorers]
+                while not all(t.done() for t in refac_tasks_list):
+                    done = sum(1 for t in refac_tasks_list if t.done())
+                    yield self._build_ui_state(state, f"🔧 Refactoring: {done}/{len(refac_tasks_list)} done")
+                    await asyncio.sleep(0.3)
+                await asyncio.gather(*refac_tasks_list, return_exceptions=True)
                 self._extract_all_files(state)
                 yield self._build_ui_state(state,
                     f"🔧 Refactorer done → re-submitting (loop {loop_idx+1})")
@@ -866,12 +925,29 @@ class SwarmEngine:
 
         # ── Phase 3: QA ──
         state.phase = "qa"
-        for aid in state.qa_agents:
-            code_snap = self._build_code_snapshot(state)
-            async for result in self._run_single_agent(state, aid, "verifying",
-                f"Verify this approved code:\n\n{code_snap}"):
+        code_snap_final = self._build_code_snapshot(state)
+        qa_count = len(state.qa_agents)
+        state.log(f"🔬 Launching {qa_count} QA agent(s) in parallel")
 
-                yield result
+        async def run_qa_agent(aid):
+            buf = []
+            try:
+                async for token in self._call_llm(aid,
+                    f"Verify this approved code:\n\n{code_snap_final}", {}):
+                    buf.append(token)
+                    state.agent_logs[aid].lines.append(token)
+                state.agent_logs[aid].status = "done"
+            except Exception as e:
+                state.agent_logs[aid].status = "error"
+                state.agent_logs[aid].error_msg = str(e)[:200]
+            state.agent_logs[aid].end_ts = time.time()
+
+        qa_tasks_list = [asyncio.ensure_future(run_qa_agent(aid)) for aid in state.qa_agents]
+        while not all(t.done() for t in qa_tasks_list):
+            done = sum(1 for t in qa_tasks_list if t.done())
+            yield self._build_ui_state(state, f"🔬 QA: {done}/{qa_count} done")
+            await asyncio.sleep(0.3)
+        await asyncio.gather(*qa_tasks_list, return_exceptions=True)
 
         # ── Phase 4: Mock-compile ──
         state.phase = "mock-compile"
@@ -1348,9 +1424,46 @@ def create_ui():
                 <h3>🚦 Execution Bus</h3><p style="color:#94a3b8;">No active task. Launch the swarm.</p>
             </div>""")
             gr.Markdown("### 💾 Virtual File System (Mock-Compiled Output)")
-            fs_output = gr.Markdown("*No files generated*", elem_id="fs-output")
+            with gr.Row():
+                fs_output = gr.Markdown("*No files generated*", elem_id="fs-output", scale=4)
+                with gr.Column(scale=1, min_width=200):
+                    download_btn = gr.Button("📥 Download All Code", variant="secondary")
+                    download_file = gr.File(label="Download", visible=True)
 
-        # ═══ Tab 4: About ═══
+        # ═══ Tab 4: System Health ═══
+        with gr.Tab("💓 Health"):
+            health_status = gr.HTML(
+                '<div style="padding:20px;color:#94a3b8;text-align:center;">Click Refresh to check agent health</div>')
+            refresh_health_btn = gr.Button("🔄 Refresh Health")
+            gr.Markdown("""### Legend
+- 🟢 **Available** — agent is live and responding
+- 🔴 **Degraded** — agent failed, retrying every 30 min
+- ⚪ **No Key** — running in simulation mode""")
+
+            def check_health(registry):
+                rows = []
+                for a in registry:
+                    if not a.enabled:
+                        continue
+                    status_icon = "🟢" if a.status == "available" else "🔴"
+                    sim_label = " (sim)" if MLLM.is_sim(a.agent_id) else ""
+                    rows.append(
+                        f'<tr><td>{a.emoji} {a.name}{sim_label}</td>'
+                        f'<td>{status_icon} {a.status}</td>'
+                        f'<td>{a.role_type.value}</td>'
+                        f'<td>{a.language.value}</td>'
+                        f'<td>{a.model or "—"}</td></tr>'
+                    )
+                if not rows:
+                    return '<div style="color:#94a3b8;text-align:center;">No agents registered</div>'
+                return f'''<table style="width:100%;border-collapse:collapse;color:#e2e8f0;font-size:0.85rem;">
+                <tr style="background:#1e293b;"><th>Agent</th><th>Health</th><th>Role</th><th>Language</th><th>Model</th></tr>
+                {"".join(rows)}</table>
+                <p style="color:#94a3b8;font-size:0.75rem;margin-top:10px;">⏰ Degraded agents retry every {RETRY_INTERVAL//60} minutes</p>'''
+
+            refresh_health_btn.click(fn=check_health, inputs=[registry_state], outputs=[health_status])
+
+        # ═══ Tab 5: About ═══
         with gr.Tab("ℹ️ About"):
             gr.Markdown("""## 🎛️ Unlimited Multi-Agent Swarm Orchestrator
 
@@ -1424,22 +1537,41 @@ A specialized JavaScript/Node.js agent that generates production-grade JS code:
         )
         stop_btn.click(fn=None, cancels=[run_event])
 
+    # ── Download handler ──
+    def build_download(registry):
+        """Build a downloadable zip of all virtual files from the last swarm."""
+        import io, zipfile
+        buf = io.BytesIO()
+        with zipfile.ZipFile(buf, 'w', zipfile.ZIP_DEFLATED) as zf:
+            # We need access to the last swarm's virtual FS
+            # For now, generate a placeholder
+            zf.writestr('README.txt',
+                'AutoClaw Swarm Output\n'
+                'Run a swarm to generate code files.\n'
+                'Files will appear here after execution.\n')
+        buf.seek(0)
+        return buf
+
+    download_btn.click(fn=build_download, inputs=[registry_state], outputs=[download_file])
+
     return demo
 
 
 def _render_dynamic_agent_grid(registry: List[AgentDef],
                                 outputs: Dict[str, str]) -> str:
-    """Render a responsive grid of agent terminal panels."""
+    """Render a responsive grid of agent terminal panels with health indicators."""
     if not outputs:
         return '<div style="color:#94a3b8;text-align:center;padding:40px;">🔧 Add agents in the Agent Registry tab, then launch</div>'
 
-    # Group agents by role
-    groups = {"generator": [], "critic": [], "refactorer": [], "qa": [], "custom": []}
+    groups: Dict[str, list] = {}
     for agent in registry:
         if agent.enabled and agent.agent_id in outputs:
             groups.setdefault(agent.role_type.value, []).append(agent)
 
-    parts = []
+    parts = ['<div style="margin-bottom:10px;padding:6px 12px;background:#1e293b;border-radius:8px;font-size:0.78rem;">'
+             '<b>🟢 Available</b> agents can be called. <b>🔴 Degraded</b> agents retry every 30 min and are skipped during swarm runs.'
+             '</div>']
+
     order = ["generator", "critic", "refactorer", "qa", "custom"]
     group_labels = {"generator":"GENERATORS","critic":"CRITICS",
                     "refactorer":"REFACTORERS","qa":"QA VERIFIERS","custom":"CUSTOM"}
@@ -1452,14 +1584,17 @@ def _render_dynamic_agent_grid(registry: List[AgentDef],
         parts.append('<div style="display:flex;flex-wrap:wrap;gap:10px;">')
         for agent in agents_list:
             text = outputs.get(agent.agent_id, "[ waiting ]")
-            # Truncate for display
-            display_text = text[-3000:] if len(text) > 3000 else text
-            parts.append(f'''<div style="flex:1;min-width:280px;max-width:450px;">
-                <div class="agent-header" style="background:{agent.color};color:white;">
-                    {agent.emoji} {agent.name}
+            display_text = text[-4000:] if len(text) > 4000 else text
+            # Health badge
+            health_color = "#22c55e" if agent.status == "available" else "#ef4444"
+            health_label = "🟢 LIVE" if agent.status == "available" else "🔴 DEGRADED"
+            parts.append(f'''<div style="flex:1;min-width:300px;max-width:500px;">
+                <div class="agent-header" style="background:{agent.color};color:white;display:flex;justify-content:space-between;align-items:center;">
+                    <span>{agent.emoji} {agent.name}</span>
+                    <span style="font-size:0.7rem;background:{health_color};padding:2px 8px;border-radius:4px;">{health_label}</span>
                 </div>
                 <pre style="background:#060a14;color:#00ff88;padding:10px;margin:0;border-radius:0 0 8px 8px;
-                font-size:0.65rem;line-height:1.3;min-height:150px;max-height:300px;overflow-y:auto;
+                font-size:0.65rem;line-height:1.3;min-height:120px;max-height:280px;overflow-y:auto;
                 white-space:pre-wrap;word-break:break-word;border:1px solid #1e293b;">{_escape_html(display_text)}</pre>
             </div>''')
         parts.append('</div>')

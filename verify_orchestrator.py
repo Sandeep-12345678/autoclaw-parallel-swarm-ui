@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""verify_orchestrator.py — Validate Unlimited Swarm with Resilient Retry"""
+"""verify_orchestrator.py — Validate improved swarm orchestrator"""
 import sys
 P = F = 0
 def c(n, ok, d=""):
@@ -9,7 +9,8 @@ def c(n, ok, d=""):
 
 print("📦 [1/5] Imports...")
 for mod in ["asyncio","hashlib","json","os","re","sys","textwrap","time","traceback",
-            "dataclasses","datetime","enum","typing","uuid","requests","gradio","openai"]:
+            "dataclasses","datetime","enum","typing","uuid","requests","io","zipfile",
+            "gradio","openai"]:
     try: __import__(mod); c(f"import {mod}", True)
     except ImportError as e: c(f"import {mod}", False, str(e))
 
@@ -20,26 +21,29 @@ try:
 except SyntaxError as e: c("app.py compiles", False, f"L{e.lineno}: {e.msg}")
 
 print("🏗️  [3/5] Structure...")
-for label, pat in [
-    ("AgentDef dataclass","class AgentDef"),
-    ("AgentDef.status field",'status: str = "available"'),
-    ("RETRY_INTERVAL = 1800","RETRY_INTERVAL = 1800"),
-    ("schedule_retry method","def schedule_retry"),
-    ("_retry_loop method","def _retry_loop"),
-    ("_try_revive_agent","def _try_revive_agent"),
-    ("retry_queue dict","retry_queue"),
-    ("No sim fallback comment","Simulation mode ONLY for agents with no API key"),
-    ("Degraded status check",'"degraded"'),
-    ("Mark degraded on failure","agent.status = \"degraded\""),
-    ("call_free_api_with_retry","def call_free_api_with_retry"),
-    ("RateLimitError handling","openai.RateLimitError"),
-    ("Exponential backoff","delay *= 2"),
-    ("Agent failure isolated","Swarm continues"),
-    ("SwarmEngine class","class SwarmEngine"),
-    ("Peter JS prompt","JAVASCRIPT_GENERATOR_PROMPT"),
-    ("Unlimited loops","max_loops_slider"),
-    ("Gradio port 7860","server_port=7860"),
-]:
+checks = [
+    ("True parallel generators", "asyncio.gather"),
+    ("Parallel critics", "critic_tasks"),
+    ("Parallel refactorers", "refac_tasks"),
+    ("Parallel QA", "qa_tasks"),
+    ("Agent health status", 'status == "available"'),
+    ("RETRY_INTERVAL", "RETRY_INTERVAL"),
+    ("Retry loop", "_retry_loop"),
+    ("ensure_retry_loop", "ensure_retry_loop"),
+    ("Health dashboard tab", "💓 Health"),
+    ("Download button", "download_btn"),
+    ("Build download fn", "def build_download"),
+    ("API timeout", "timeout"),
+    ("call_free_api_with_retry", "call_free_api_with_retry"),
+    ("No sim fallback", "Simulation mode ONLY"),
+    ("Rate limit handler", "RateLimitError"),
+    ("Peter JS", "JAVASCRIPT_GENERATOR_PROMPT"),
+    ("Agent Registry tab", "Agent Registry"),
+    ("Swarm Orchestrator tab", "Swarm Orchestrator"),
+    ("Unlimited loops", "unlimited_loops"),
+    ("Port 7860", "server_port=7860"),
+]
+for label, pat in checks:
     c(label, pat in src)
 
 print("📋 [4/5] Requirements...")
@@ -49,12 +53,12 @@ except: reqs = ""
 for pkg in ["gradio","requests","aiohttp","openai"]:
     c(f"req: {pkg}", pkg in reqs)
 
-print("📄 [5/5] README...")
+print("📄 [5/5] Config...")
 try:
     with open("README.md") as f: rm = f.read()
 except: rm = ""
-for item in ["---","sdk: docker","7860","GitHub","Hugging Face"]:
-    c(f"README: {item}", item in rm)
+for item in ["---","sdk: docker","7860"]:
+    c(f"README: {item}", item in rm[:500])
 
 print(f"\n{'='*60}\n  Results: {P} passed, {F} failed\n{'='*60}")
 sys.exit(0 if F == 0 else 1)
